@@ -9,9 +9,11 @@ import {
 } from "firebase/firestore";
 import { db } from "../firebase";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Clock, Loader2, CheckCircle, Package, LogOut, UtensilsCrossed, ClipboardList } from "lucide-react";
+import { ArrowLeft, Clock, Loader2, CheckCircle, Package, LogOut, UtensilsCrossed, ClipboardList, IndianRupee, MessageSquare, Star, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useAuth } from "../context/AuthContext";
+import DeveloperWatermark from "../components/DeveloperWatermark";
+import StallPaymentSetup from "../components/StallPaymentSetup";
 
 const OwnerDashboard = () => {
   const navigate = useNavigate();
@@ -19,7 +21,10 @@ const OwnerDashboard = () => {
 
   const [orders, setOrders] = useState<any[]>([]);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"orders" | "stock">("orders");
+  const [activeTab, setActiveTab] = useState<"orders" | "stock" | "payments" | "feedback">("orders");
+  const [orderFeedback, setOrderFeedback] = useState<any[]>([]);
+  const [appFeedback, setAppFeedback] = useState<any[]>([]);
+  const [feedbackTab, setFeedbackTab] = useState<"order" | "app">("order");
 
   // ================= MENU STOCK STATE =================
   const [menu, setMenu] = useState<any[]>([]);
@@ -80,7 +85,11 @@ const OwnerDashboard = () => {
   const updateStatus = async (id: string, status: string) => {
     try {
       setUpdatingId(id);
-      await updateDoc(doc(db, "orders", id), { status });
+      const extra: any = {};
+      if (status === "paid") {
+        extra.paymentConfirmedAt = new Date();
+      }
+      await updateDoc(doc(db, "orders", id), { status, ...extra });
     } catch (error) {
       console.error("Error updating:", error);
       alert("Failed to update order.");
@@ -88,6 +97,26 @@ const OwnerDashboard = () => {
       setUpdatingId(null);
     }
   };
+
+  // Fetch feedback collections
+  useEffect(() => {
+    const u1 = onSnapshot(collection(db, "orderFeedback"), (snap) => {
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort((a: any, b: any) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setOrderFeedback(data);
+    });
+    const u2 = onSnapshot(collection(db, "appFeedback"), (snap) => {
+      const data = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      data.sort((a: any, b: any) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+      setAppFeedback(data);
+    });
+    return () => { u1(); u2(); };
+  }, []);
+
+  const pendingPayments = orders.filter((o: any) => o.status === "payment_submitted");
+  const avgRating = orderFeedback.length
+    ? (orderFeedback.reduce((s, f: any) => s + (f.rating || 0), 0) / orderFeedback.length).toFixed(1)
+    : "—";
 
   // ================= STATS =================
   const pendingCount = orders.filter((o: any) => o.status === "pending").length;
@@ -99,6 +128,14 @@ const OwnerDashboard = () => {
   // ================= STATUS STYLING =================
   const getStatusStyle = (status: string) => {
     switch (status) {
+      case "awaiting_payment":
+        return { bg: "bg-warning/15 text-warning", icon: <IndianRupee className="w-4 h-4" /> };
+      case "payment_submitted":
+        return { bg: "bg-secondary/15 text-secondary", icon: <IndianRupee className="w-4 h-4" /> };
+      case "paid":
+        return { bg: "bg-success/15 text-success", icon: <CheckCircle className="w-4 h-4" /> };
+      case "payment_failed":
+        return { bg: "bg-destructive/15 text-destructive", icon: <X className="w-4 h-4" /> };
       case "pending":
         return { bg: "bg-warning/15 text-warning", icon: <Clock className="w-4 h-4" /> };
       case "preparing":
@@ -116,6 +153,17 @@ const OwnerDashboard = () => {
     const isUpdating = updatingId === order.id;
     const base = "w-full py-2.5 rounded-xl font-bold text-sm transition-all disabled:opacity-60";
 
+    if (order.status === "paid") {
+      return (
+        <button
+          onClick={() => updateStatus(order.id, "preparing")}
+          disabled={isUpdating}
+          className={`${base} bg-secondary text-secondary-foreground hover:opacity-90`}
+        >
+          {isUpdating ? "Updating..." : "🔥 Start Preparing"}
+        </button>
+      );
+    }
     if (order.status === "pending") {
       return (
         <button
@@ -176,29 +224,26 @@ const OwnerDashboard = () => {
 
       {/* Tab Switcher */}
       <div className="px-4 -mt-5">
-        <div className="bg-card rounded-2xl shadow-card p-1.5 flex gap-1.5">
-          <button
-            onClick={() => setActiveTab("orders")}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
-              activeTab === "orders"
-                ? "gradient-primary text-primary-foreground shadow-elevated"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <ClipboardList className="w-4 h-4" />
-            Orders
-          </button>
-          <button
-            onClick={() => setActiveTab("stock")}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold transition-all ${
-              activeTab === "stock"
-                ? "gradient-primary text-primary-foreground shadow-elevated"
-                : "text-muted-foreground hover:text-foreground"
-            }`}
-          >
-            <UtensilsCrossed className="w-4 h-4" />
-            Stock
-          </button>
+        <div className="bg-card rounded-2xl shadow-card p-1.5 flex gap-1.5 overflow-x-auto scrollbar-hide">
+          {[
+            { id: "orders", icon: ClipboardList, label: "Orders" },
+            { id: "payments", icon: IndianRupee, label: `Payments${pendingPayments.length ? ` (${pendingPayments.length})` : ""}` },
+            { id: "stock", icon: UtensilsCrossed, label: "Stock" },
+            { id: "feedback", icon: MessageSquare, label: "Feedback" },
+          ].map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id as any)}
+              className={`flex-1 min-w-fit flex items-center justify-center gap-1.5 py-3 px-3 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
+                activeTab === t.id
+                  ? "gradient-primary text-primary-foreground shadow-elevated"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <t.icon className="w-3.5 h-3.5" />
+              {t.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -312,6 +357,171 @@ const OwnerDashboard = () => {
           </>
         )}
 
+        {/* ============ PAYMENTS TAB ============ */}
+        {activeTab === "payments" && (
+          <>
+            <StallPaymentSetup />
+            <div className="bg-card rounded-2xl shadow-card p-4 mb-4">
+              <p className="text-xs text-muted-foreground mb-1">Pending Payment Confirmations</p>
+              <p className="text-3xl font-black text-foreground">{pendingPayments.length}</p>
+            </div>
+            {pendingPayments.length === 0 ? (
+              <div className="text-center py-16 bg-card rounded-2xl shadow-card">
+                <span className="text-5xl block mb-3">💸</span>
+                <p className="text-muted-foreground text-sm">No payments to verify.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {pendingPayments.map((order: any) => (
+                  <motion.div
+                    key={order.id}
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="bg-card rounded-2xl shadow-card p-5"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg">🎟</span>
+                        <span className="font-black text-foreground text-xl">#{order.tokenNumber}</span>
+                      </div>
+                      <span className="text-lg font-black text-foreground">₹{order.totalAmount}</span>
+                    </div>
+                    <div className="bg-muted rounded-xl p-3 mb-3">
+                      <p className="text-[11px] text-muted-foreground uppercase tracking-wide">UPI Txn Ref</p>
+                      <p className="font-mono text-sm font-bold text-foreground break-all">{order.paymentRef || "—"}</p>
+                      {order.customerEmail && (
+                        <p className="text-xs text-muted-foreground mt-1">From: {order.customerEmail}</p>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={() => updateStatus(order.id, "payment_failed")}
+                        disabled={updatingId === order.id}
+                        className="py-2.5 rounded-xl bg-destructive/15 text-destructive font-bold text-sm hover:bg-destructive/25 disabled:opacity-60"
+                      >
+                        ❌ Reject
+                      </button>
+                      <button
+                        onClick={() => updateStatus(order.id, "paid")}
+                        disabled={updatingId === order.id}
+                        className="py-2.5 rounded-xl bg-success text-success-foreground font-bold text-sm hover:opacity-90 disabled:opacity-60"
+                      >
+                        ✅ Confirm
+                      </button>
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ============ FEEDBACK TAB ============ */}
+        {activeTab === "feedback" && (
+          <>
+            <div className="grid grid-cols-3 gap-3 mb-5">
+              <div className="bg-card rounded-2xl shadow-card p-3 text-center">
+                <Star className="w-4 h-4 text-warning fill-current mx-auto mb-1" />
+                <p className="text-lg font-black text-foreground">{avgRating}</p>
+                <p className="text-[10px] text-muted-foreground">Avg Rating</p>
+              </div>
+              <div className="bg-card rounded-2xl shadow-card p-3 text-center">
+                <p className="text-lg font-black text-foreground">{orderFeedback.length}</p>
+                <p className="text-[10px] text-muted-foreground">Order Reviews</p>
+              </div>
+              <div className="bg-card rounded-2xl shadow-card p-3 text-center">
+                <p className="text-lg font-black text-foreground">{appFeedback.length}</p>
+                <p className="text-[10px] text-muted-foreground">App Feedback</p>
+              </div>
+            </div>
+
+            <div className="bg-card rounded-2xl shadow-card p-1.5 flex gap-1.5 mb-4">
+              <button
+                onClick={() => setFeedbackTab("order")}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-bold ${
+                  feedbackTab === "order" ? "gradient-primary text-primary-foreground" : "text-muted-foreground"
+                }`}
+              >
+                ⭐ Order Feedback
+              </button>
+              <button
+                onClick={() => setFeedbackTab("app")}
+                className={`flex-1 py-2.5 rounded-xl text-xs font-bold ${
+                  feedbackTab === "app" ? "gradient-primary text-primary-foreground" : "text-muted-foreground"
+                }`}
+              >
+                💬 App Feedback
+              </button>
+            </div>
+
+            {feedbackTab === "order" && (
+              <div className="space-y-3">
+                {orderFeedback.length === 0 && (
+                  <div className="text-center py-12 bg-card rounded-2xl shadow-card">
+                    <span className="text-4xl block mb-2">⭐</span>
+                    <p className="text-muted-foreground text-sm">No reviews yet.</p>
+                  </div>
+                )}
+                {orderFeedback.map((f: any) => (
+                  <div key={f.id} className="bg-card rounded-2xl shadow-card p-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-1">
+                        {[1, 2, 3, 4, 5].map((n) => (
+                          <Star
+                            key={n}
+                            className={`w-4 h-4 ${n <= (f.rating || 0) ? "text-warning fill-current" : "text-muted"}`}
+                          />
+                        ))}
+                      </div>
+                      {f.tokenNumber && (
+                        <span className="text-xs font-bold text-muted-foreground">#{f.tokenNumber}</span>
+                      )}
+                    </div>
+                    {f.tags?.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {f.tags.map((t: string) => (
+                          <span key={t} className="px-2 py-0.5 rounded-full bg-accent/30 text-[10px] font-bold text-foreground">
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {f.comment && <p className="text-sm text-foreground">{f.comment}</p>}
+                    {f.customerEmail && (
+                      <p className="text-[10px] text-muted-foreground mt-2">{f.customerEmail}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {feedbackTab === "app" && (
+              <div className="space-y-3">
+                {appFeedback.length === 0 && (
+                  <div className="text-center py-12 bg-card rounded-2xl shadow-card">
+                    <span className="text-4xl block mb-2">💬</span>
+                    <p className="text-muted-foreground text-sm">No app feedback yet.</p>
+                  </div>
+                )}
+                {appFeedback.map((f: any) => (
+                  <div key={f.id} className="bg-card rounded-2xl shadow-card p-4">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[10px] font-bold uppercase">
+                        {f.type || "feedback"}
+                      </span>
+                      {f.email && <span className="text-[10px] text-muted-foreground">{f.email}</span>}
+                    </div>
+                    <p className="text-sm text-foreground">{f.message}</p>
+                    {f.route && (
+                      <p className="text-[10px] text-muted-foreground mt-2">on {f.route}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
         {/* ============ STOCK TAB ============ */}
         {activeTab === "stock" && (
           <>
@@ -387,6 +597,7 @@ const OwnerDashboard = () => {
             </div>
           </>
         )}
+        <DeveloperWatermark />
       </div>
     </div>
   );

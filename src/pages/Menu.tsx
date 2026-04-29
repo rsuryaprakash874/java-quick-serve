@@ -4,23 +4,93 @@ import {
   onSnapshot,
   addDoc,
   serverTimestamp,
+  updateDoc,
+  doc,
 } from "firebase/firestore";
 import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import DeveloperWatermark from "../components/DeveloperWatermark";
 import { ArrowLeft, Plus, Minus, ShoppingBag, Star, Clock, MapPin, Search } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import confetti from "canvas-confetti";
+import { useStallSettings } from "../hooks/useStallSettings";
+import { Copy, Download, Smartphone } from "lucide-react";
+import { toast } from "sonner";
 
 const Menu = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const { settings: stallSettings } = useStallSettings();
 
   const [menuItems, setMenuItems] = useState<any[]>([]);
   const [cart, setCart] = useState<any[]>([]);
   const [placingOrder, setPlacingOrder] = useState(false);
   const [showCart, setShowCart] = useState(false);
   const [orderPlaced, setOrderPlaced] = useState<{ token: number; total: number } | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [orderId, setOrderId] = useState<string | null>(null);
+  const [liveOrder, setLiveOrder] = useState<any | null>(null);
+  const [upiRef, setUpiRef] = useState("");
+  const [submittingPayment, setSubmittingPayment] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(searchParams.get("search") || "");
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(
+    searchParams.get("category")
+  );
+  const highlightId = searchParams.get("highlight");
+
+  // Sync search to URL
+  useEffect(() => {
+    const next = new URLSearchParams(searchParams);
+    if (searchQuery) next.set("search", searchQuery);
+    else next.delete("search");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchQuery]);
+
+  // Scroll to highlighted item
+  useEffect(() => {
+    if (!highlightId || menuItems.length === 0) return;
+    const t = setTimeout(() => {
+      const el = document.getElementById(`menu-item-${highlightId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("ring-2", "ring-primary", "ring-offset-2");
+        setTimeout(() => el.classList.remove("ring-2", "ring-primary", "ring-offset-2"), 2400);
+      }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [highlightId, menuItems]);
+
+  // Live order subscription (for payment status updates from owner)
+  useEffect(() => {
+    if (!orderId) return;
+    const unsub = onSnapshot(doc(db, "orders", orderId), (snap) => {
+      if (snap.exists()) setLiveOrder({ id: snap.id, ...snap.data() });
+    });
+    return () => unsub();
+  }, [orderId]);
+
+  const submitUpiRef = async () => {
+    if (!orderId) return;
+    if (!upiRef.trim() || upiRef.trim().length < 6) {
+      alert("Please enter a valid UPI transaction reference (min 6 chars)");
+      return;
+    }
+    try {
+      setSubmittingPayment(true);
+      await updateDoc(doc(db, "orders", orderId), {
+        status: "payment_submitted",
+        paymentRef: upiRef.trim(),
+        paidAt: serverTimestamp(),
+      });
+    } catch (e) {
+      console.error(e);
+      alert("Failed to submit. Try again.");
+    } finally {
+      setSubmittingPayment(false);
+    }
+  };
 
   // ================= FETCH MENU =================
   useEffect(() => {
@@ -37,6 +107,13 @@ const Menu = () => {
 
   // ================= ADD TO CART =================
   const addToCart = (item: any) => {
+    if ("vibrate" in navigator) navigator.vibrate(15);
+    // brief accent ring on the card
+    const el = document.getElementById(`menu-item-${item.id}`);
+    if (el) {
+      el.classList.add("ring-2", "ring-accent", "ring-offset-2");
+      setTimeout(() => el.classList.remove("ring-2", "ring-accent", "ring-offset-2"), 600);
+    }
     const existing = cart.find((i) => i.id === item.id);
 
     if (existing) {
@@ -91,9 +168,10 @@ const Menu = () => {
 
       const tokenNumber = Math.floor(1000 + Math.random() * 9000);
 
-      await addDoc(collection(db, "orders"), {
+      const ref = await addDoc(collection(db, "orders"), {
         tokenNumber,
-        status: "pending",
+        status: "awaiting_payment",
+        paymentMethod: "upi",
         items: cart,
         customerId: user.uid,
         customerEmail: user.email,
@@ -102,8 +180,18 @@ const Menu = () => {
       });
 
       setOrderPlaced({ token: tokenNumber, total: totalAmount });
+      setOrderId(ref.id);
       setCart([]);
       setShowCart(false);
+
+      // Celebration!
+      confetti({
+        particleCount: 120,
+        spread: 80,
+        origin: { y: 0.5 },
+        colors: ["#E23744", "#FC8019", "#FFD93D", "#4ade80"],
+      });
+      if ("vibrate" in navigator) navigator.vibrate(200);
     } catch (error) {
       console.error("Error placing order:", error);
       alert("Failed to place order");
@@ -116,10 +204,19 @@ const Menu = () => {
   const filteredItems = menuItems
     .filter((item) => item.available === true)
     .filter((item) =>
+      !selectedCategory ||
+      (item.category || "").toLowerCase() === selectedCategory.toLowerCase()
+    )
+    .filter((item) =>
       searchQuery === "" ||
       item.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.category?.toLowerCase().includes(searchQuery.toLowerCase())
+      item.category?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      item.description?.toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+  const allCategories = Array.from(
+    new Set(menuItems.filter((i) => i.available).map((i) => i.category || "Others"))
+  );
 
   const grouped = filteredItems.reduce((acc: any, item: any) => {
     const category = item.category || "Others";
@@ -134,6 +231,42 @@ const Menu = () => {
 
   // ================= UPI PAYMENT SCREEN =================
   if (orderPlaced) {
+    const upiId = stallSettings?.upiId || "";
+    const stallName = stallSettings?.stallName || "Java Quick Serve";
+    const qrUrl = stallSettings?.qrImageUrl || "";
+    const upiDeepLink = upiId
+      ? `upi://pay?pa=${encodeURIComponent(upiId)}&pn=${encodeURIComponent(stallName)}&am=${orderPlaced.total}&cu=INR&tn=${encodeURIComponent("Order #" + orderPlaced.token)}`
+      : "";
+
+    const copyUpi = async () => {
+      if (!upiId) return;
+      try {
+        await navigator.clipboard.writeText(upiId);
+        toast.success("UPI ID copied!");
+      } catch {
+        toast.error("Couldn't copy");
+      }
+    };
+
+    const downloadQr = async () => {
+      if (!qrUrl) return;
+      try {
+        const res = await fetch(qrUrl);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${stallName.replace(/\s+/g, "-")}-UPI-QR.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        toast.success("QR downloaded");
+      } catch {
+        toast.error("Download failed");
+      }
+    };
+
     return (
       <div className="min-h-screen bg-background">
         <div className="gradient-hero px-4 pt-12 pb-8">
@@ -159,31 +292,105 @@ const Menu = () => {
               <p className="text-3xl font-black text-foreground">₹{orderPlaced.total}</p>
             </div>
 
-            {/* UPI QR Placeholder */}
-            <div className="mb-6">
-              <div className="w-48 h-48 mx-auto bg-muted rounded-2xl flex items-center justify-center mb-3">
-                <div className="text-center">
-                  <span className="text-4xl block mb-2">📱</span>
-                  <p className="text-xs text-muted-foreground">UPI QR Code</p>
-                </div>
+            {/* UPI QR */}
+            <div className="mb-4">
+              <div className="w-52 h-52 mx-auto bg-white rounded-2xl flex items-center justify-center mb-3 p-3 shadow-card">
+                {qrUrl ? (
+                  <img
+                    src={qrUrl}
+                    alt={`${stallName} UPI QR`}
+                    className="w-full h-full object-contain"
+                  />
+                ) : (
+                  <div className="text-center">
+                    <span className="text-4xl block mb-2">☕</span>
+                    <p className="text-xs text-muted-foreground">QR not set up yet</p>
+                  </div>
+                )}
               </div>
-              <p className="text-sm font-medium text-foreground">UPI ID: sunnydays@upi</p>
+
+              {upiId ? (
+                <button
+                  onClick={copyUpi}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-muted hover:bg-border transition-colors"
+                >
+                  <span className="text-sm font-mono font-bold text-foreground">{upiId}</span>
+                  <Copy className="w-3.5 h-3.5 text-muted-foreground" />
+                </button>
+              ) : (
+                <p className="text-xs text-muted-foreground">UPI ID not configured</p>
+              )}
             </div>
+
+            {/* Quick payment actions */}
+            {(qrUrl || upiId) && (
+              <div className="grid grid-cols-2 gap-2 mb-4">
+                {upiId && (
+                  <a
+                    href={upiDeepLink}
+                    className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl gradient-primary text-primary-foreground font-bold text-sm shadow-elevated"
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    Pay in UPI App
+                  </a>
+                )}
+                {qrUrl && (
+                  <button
+                    onClick={downloadQr}
+                    className={`flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-muted text-foreground font-bold text-sm hover:bg-border transition-colors ${
+                      upiId ? "" : "col-span-2"
+                    }`}
+                  >
+                    <Download className="w-4 h-4" />
+                    Download QR
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Instructions */}
             <div className="mb-6 p-4 rounded-xl bg-primary/5 border border-primary/20">
               <p className="text-sm text-foreground leading-relaxed">
-                Scan the QR code using any UPI app (Google Pay, PhonePe, Paytm) and complete the payment.
+                Scan the QR or tap <strong>Pay in UPI App</strong>, complete the payment, then paste the UPI Txn ID below so the stall can confirm it.
               </p>
             </div>
 
-            {/* Action Buttons */}
-            <button
-              onClick={() => navigate("/customer/home")}
-              className="w-full gradient-primary text-primary-foreground rounded-xl py-3.5 font-bold text-sm shadow-elevated hover:opacity-95 transition-opacity mb-3"
-            >
-              ✅ I Have Paid
-            </button>
+            {/* Live status banner */}
+            {liveOrder?.status === "payment_submitted" && (
+              <div className="mb-4 p-3 rounded-xl bg-warning/10 text-warning text-sm font-bold border border-warning/30">
+                ⏳ Waiting for owner to confirm payment…
+              </div>
+            )}
+            {liveOrder?.status === "paid" || liveOrder?.status === "preparing" ? (
+              <div className="mb-4 p-3 rounded-xl bg-success/10 text-success text-sm font-bold border border-success/30">
+                ✅ Payment confirmed! Order is being prepared.
+              </div>
+            ) : null}
+            {liveOrder?.status === "payment_failed" && (
+              <div className="mb-4 p-3 rounded-xl bg-destructive/10 text-destructive text-sm font-bold border border-destructive/30">
+                ❌ Owner couldn't verify your payment. Please retry.
+              </div>
+            )}
+
+            {/* UPI ref input — only when awaiting / failed */}
+            {(!liveOrder || liveOrder.status === "awaiting_payment" || liveOrder.status === "payment_failed") && (
+              <>
+                <input
+                  type="text"
+                  value={upiRef}
+                  onChange={(e) => setUpiRef(e.target.value)}
+                  placeholder="Enter UPI Txn ID (e.g. 123456789012)"
+                  className="w-full mb-3 px-4 py-3 rounded-xl bg-muted text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/40"
+                />
+                <button
+                  onClick={submitUpiRef}
+                  disabled={submittingPayment}
+                  className="w-full gradient-primary text-primary-foreground rounded-xl py-3.5 font-bold text-sm shadow-elevated hover:opacity-95 transition-opacity mb-3 disabled:opacity-60"
+                >
+                  {submittingPayment ? "Submitting…" : "✅ I Have Paid — Submit"}
+                </button>
+              </>
+            )}
             <button
               onClick={() => navigate("/customer/home")}
               className="w-full bg-muted text-foreground rounded-xl py-3 font-bold text-sm hover:bg-border transition-colors"
@@ -251,13 +458,51 @@ const Menu = () => {
         </div>
       </div>
 
+      {/* Category pills */}
+      {allCategories.length > 0 && (
+        <div className="px-4 pb-2">
+          <div className="flex gap-2 overflow-x-auto scrollbar-hide">
+            <button
+              onClick={() => setSelectedCategory(null)}
+              className={`shrink-0 px-4 py-1.5 rounded-full text-xs font-bold transition-all ${
+                !selectedCategory
+                  ? "gradient-primary text-primary-foreground shadow-elevated scale-105"
+                  : "bg-muted text-muted-foreground hover:bg-border"
+              }`}
+            >
+              All
+            </button>
+            {allCategories.map((cat) => {
+              const active = selectedCategory?.toLowerCase() === cat.toLowerCase();
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setSelectedCategory(active ? null : cat)}
+                  className={`shrink-0 px-4 py-1.5 rounded-full text-xs font-bold transition-all ${
+                    active
+                      ? "gradient-primary text-primary-foreground shadow-elevated scale-105"
+                      : "bg-muted text-muted-foreground hover:bg-border"
+                  }`}
+                >
+                  {cat}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Menu Content */}
       <div className="px-4 pb-28">
         {Object.keys(grouped).length === 0 && (
           <div className="text-center py-16 bg-card rounded-2xl shadow-card">
             <span className="text-5xl block mb-3">🍽️</span>
             <p className="text-muted-foreground text-sm">
-              {searchQuery ? "No items match your search." : "No menu items available."}
+              {searchQuery
+                ? `No items match "${searchQuery}".`
+                : selectedCategory
+                ? `No ${selectedCategory} available right now 😔`
+                : "No menu items available."}
             </p>
           </div>
         )}
@@ -277,9 +522,10 @@ const Menu = () => {
                 return (
                   <motion.div
                     key={item.id}
+                    id={`menu-item-${item.id}`}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="flex items-center justify-between p-4"
+                    className="flex items-center justify-between p-4 transition-shadow rounded-lg"
                   >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
@@ -302,30 +548,43 @@ const Menu = () => {
                     <div className="shrink-0">
                       {qty === 0 ? (
                         <motion.button
+                          layout
                           whileTap={{ scale: 0.9 }}
                           onClick={() => addToCart(item)}
-                          className="px-5 py-1.5 rounded-lg border-2 border-primary text-primary text-sm font-bold hover:bg-primary hover:text-primary-foreground transition-colors"
+                          className="px-5 py-1.5 rounded-lg border-2 border-primary text-primary text-sm font-bold font-cartoon hover:bg-primary hover:text-primary-foreground transition-colors"
                         >
                           ADD
                         </motion.button>
                       ) : (
-                        <div className="flex items-center gap-0 rounded-lg overflow-hidden bg-primary">
+                        <motion.div
+                          layout
+                          initial={{ scale: 0.85, opacity: 0 }}
+                          animate={{ scale: 1, opacity: 1 }}
+                          transition={{ type: "spring", stiffness: 380, damping: 22 }}
+                          className="flex items-center gap-0 rounded-lg overflow-hidden bg-primary shadow-card"
+                        >
                           <button
                             onClick={() => removeFromCart(item)}
                             className="px-2.5 py-1.5 text-primary-foreground hover:opacity-80"
                           >
                             <Minus className="w-3.5 h-3.5" />
                           </button>
-                          <span className="px-3 py-1.5 text-sm font-bold text-primary-foreground min-w-[28px] text-center">
+                          <motion.span
+                            key={qty}
+                            initial={{ scale: 1.4, y: -4 }}
+                            animate={{ scale: 1, y: 0 }}
+                            transition={{ type: "spring", stiffness: 500, damping: 18 }}
+                            className="px-3 py-1.5 text-sm font-black text-primary-foreground min-w-[28px] text-center"
+                          >
                             {qty}
-                          </span>
+                          </motion.span>
                           <button
                             onClick={() => addToCart(item)}
                             className="px-2.5 py-1.5 text-primary-foreground hover:opacity-80"
                           >
                             <Plus className="w-3.5 h-3.5" />
                           </button>
-                        </div>
+                        </motion.div>
                       )}
                     </div>
                   </motion.div>
@@ -436,6 +695,7 @@ const Menu = () => {
           </>
         )}
       </AnimatePresence>
+      <DeveloperWatermark />
     </div>
   );
 };

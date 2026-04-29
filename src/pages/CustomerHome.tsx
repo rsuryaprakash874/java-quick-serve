@@ -9,7 +9,10 @@ import { db } from "../firebase";
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { Search, Clock, CheckCircle, Loader2, Star, ChevronRight, MapPin, Zap, Flame, LogOut } from "lucide-react";
+import DeveloperWatermark from "../components/DeveloperWatermark";
+import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
+import OrderTracker from "../components/OrderTracker";
 
 const quickCategories = [
   { icon: "🍛", label: "Meals" },
@@ -24,8 +27,33 @@ const CustomerHome = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [orders, setOrders] = useState<any[]>([]);
+  const [prevOrders, setPrevOrders] = useState<Map<string, string>>(new Map());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
+  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  const [menuItems, setMenuItems] = useState<any[]>([]);
+
+  // Stream menu for live search
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, "menuItems"), (snap) => {
+      setMenuItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    });
+    return () => unsub();
+  }, []);
+
+  const searchResults = searchQuery.trim().length > 0
+    ? menuItems
+        .filter((i: any) => i.available !== false)
+        .filter((i: any) => {
+          const q = searchQuery.toLowerCase();
+          return (
+            i.name?.toLowerCase().includes(q) ||
+            i.category?.toLowerCase().includes(q) ||
+            i.description?.toLowerCase().includes(q)
+          );
+        })
+        .slice(0, 6)
+    : [];
 
   useEffect(() => {
     if (!user) return;
@@ -44,6 +72,37 @@ const CustomerHome = () => {
         }));
 
         data = data.filter((order: any) => order.status !== "sold");
+
+        // Check for status changes to "ready" (skip first load)
+        if (!isFirstLoad) {
+          data.forEach((order: any) => {
+            const prev = prevOrders.get(order.id);
+            if (prev && prev !== "ready" && order.status === "ready") {
+              toast.success(`🎉 Order #${order.tokenNumber} is ready!`, {
+                description: "Head to the counter to pick it up!",
+                duration: 8000,
+              });
+              // Browser notification
+              if (Notification.permission === "granted") {
+                new Notification("Order Ready! 🎉", {
+                  body: `Your order #${order.tokenNumber} is ready for pickup!`,
+                  icon: "/favicon.ico",
+                });
+              }
+            }
+          });
+        } else {
+          setIsFirstLoad(false);
+          // Request notification permission on first load
+          if ("Notification" in window && Notification.permission === "default") {
+            Notification.requestPermission();
+          }
+        }
+
+        // Store current statuses for next comparison
+        const statusMap = new Map<string, string>();
+        data.forEach((o: any) => statusMap.set(o.id, o.status));
+        setPrevOrders(statusMap);
 
         data.sort((a: any, b: any) => {
           const timeA = a.createdAt?.seconds || 0;
@@ -192,9 +251,57 @@ const CustomerHome = () => {
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 onFocus={() => setSearchFocused(true)}
-                onBlur={() => setSearchFocused(false)}
+                onBlur={() => setTimeout(() => setSearchFocused(false), 150)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && searchQuery.trim()) {
+                    navigate(`/customer/menu?search=${encodeURIComponent(searchQuery.trim())}`);
+                  }
+                }}
                 className="w-full pl-12 pr-4 py-4 rounded-2xl bg-card text-foreground text-sm placeholder:text-muted-foreground/70 focus:outline-none shadow-elevated transition-all border-2 border-transparent focus:border-primary/30"
               />
+
+              {/* Live search dropdown */}
+              <AnimatePresence>
+                {searchFocused && searchQuery.trim().length > 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    className="absolute top-full left-0 right-0 mt-2 bg-card rounded-2xl shadow-elevated overflow-hidden z-30 border border-border/50 max-h-80 overflow-y-auto"
+                  >
+                    {searchResults.length === 0 ? (
+                      <div className="p-5 text-center">
+                        <p className="text-sm text-muted-foreground">No matches for "{searchQuery}"</p>
+                        <p className="text-[11px] text-muted-foreground/70 mt-1">Try "coffee" or "maggi"</p>
+                      </div>
+                    ) : (
+                      searchResults.map((item: any) => (
+                        <button
+                          key={item.id}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            navigate(`/customer/menu?highlight=${item.id}`);
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-3 hover:bg-muted text-left transition-colors border-b border-border/30 last:border-0"
+                        >
+                          <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center text-xl shrink-0">
+                            {item.image ? (
+                              <img src={item.image} alt={item.name} className="w-full h-full object-cover rounded-lg" />
+                            ) : (
+                              "🍽️"
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm font-bold text-foreground truncate">{item.name}</p>
+                            <p className="text-[11px] text-muted-foreground">{item.category} · ₹{item.price}</p>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                        </button>
+                      ))
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
           </motion.div>
         </div>
@@ -229,7 +336,7 @@ const CustomerHome = () => {
                 transition={{ delay: 0.3 + i * 0.06, type: "spring", stiffness: 300 }}
                 whileHover={{ y: -6, scale: 1.08 }}
                 whileTap={{ scale: 0.9 }}
-                onClick={() => navigate("/customer/menu")}
+                onClick={() => navigate(`/customer/menu?category=${encodeURIComponent(cat.label)}`)}
                 className="flex flex-col items-center gap-2 shrink-0"
               >
                 <div className="w-16 h-16 rounded-[20px] bg-card shadow-card flex items-center justify-center text-[28px] hover:shadow-card-hover transition-all duration-300 border border-border/50 relative overflow-hidden">
@@ -414,6 +521,10 @@ const CustomerHome = () => {
                       <span className="font-bold text-foreground">₹{order.totalAmount}</span>
                     </div>
                   )}
+
+                  <div className="border-t border-border mt-3 pt-2">
+                    <OrderTracker status={order.status} />
+                  </div>
                 </motion.div>
               ))}
             </div>
@@ -438,6 +549,7 @@ const CustomerHome = () => {
             <p className="text-muted-foreground text-xs mt-1">Tap on Sunny Days to start ordering!</p>
           </motion.div>
         )}
+        <DeveloperWatermark />
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
+import AppFeedbackButton from "@/components/AppFeedbackButton";
 
 import Splash from "@/pages/Splash";
 import RoleSelect from "@/pages/RoleSelect";
@@ -29,6 +30,7 @@ const App = () => (
           <Route path="/owner/dashboard" element={<OwnerDashboard />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
+        <AppFeedbackButton />
       </BrowserRouter>
     </TooltipProvider>
   </AuthProvider>
